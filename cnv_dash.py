@@ -28,7 +28,7 @@ GOOGLE_KEY_PATH = os.environ.get(
 # 1) Streamlit 기본
 # =========================================================
 st.set_page_config(page_title="상담→주문(0~72h) 피벗 대시보드", layout="wide")
-st.title("📊 상담 → 주문(0~72h) 피벗 대시보드")
+st.title("📊 상담 → 주문(0~72h) 피벗 대시보드 조영우")
 
 # =========================================================
 # 2) BigQuery Client (로컬/깃/배포 범용)
@@ -397,7 +397,7 @@ with tab_raw:
     st.subheader("로우데이터 (left join 결과 확인 / CSV 다운로드)")
     st.caption(
         "⚠️ 로우데이터는 비용/속도를 위해 버튼 클릭 시에만 불러오며, 기본 LIMIT가 걸어둠.\n"
-        "원하면 사이드바에서 리밋 올려서 조회가능함."
+        "원하면 사이드바에서 리밋 올려서 조회가능함 \n 한달치 정도는 디폴트 세팅값에서 조회해도 충분합니다."
     )
 
     if "raw_loaded" not in st.session_state:
