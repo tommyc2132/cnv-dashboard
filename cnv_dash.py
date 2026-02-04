@@ -27,14 +27,34 @@ GOOGLE_KEY_PATH = os.environ.get(
 # =========================================================
 st.set_page_config(page_title="상담 → 주문(0~48h) 대시보드", layout="wide")
 st.title("📊 상담 → 주문전환 측정 (0~48h) 대시보드 ")
+
+# 🔥 [추가] 전환율 정의 노티
+st.markdown(
+    """
+<div style="
+  background-color:#fff4e5;
+  border-left:6px solid #ff9800;
+  padding:12px 14px;
+  border-radius:6px;
+  font-size:0.95rem;
+  line-height:1.5;
+">
+<b>⚠️ 전환율 산정 기준 안내</b><br/>
+- 본 대시보드는 <b>무효 상담을 모수에서 제외</b>한 후 전환율을 계산합니다.<br/>
+- 정상 상담 기준의 <b>실질 구매 전환 성과</b>를 보기 위한 지표입니다.<br/>
+- 전환 조건: <b>상담 후 48시간 이내</b>, <b>C주문 제외</b>, <b>결제금액 &gt; 0</b>
+</div>
+""",
+    unsafe_allow_html=True
+)
+
 st.caption(f" · 날짜 기준: 상담일자(inbound_date)")
 
 # =========================================================
-# 2) BigQuery Client (로컬/배포 범용)
+# 2) BigQuery Client (기존 코드 그대로)
 # =========================================================
 @st.cache_resource(show_spinner=False)
 def get_bq_client():
-    # 1) 로컬 키파일 우선
     if GOOGLE_KEY_PATH and os.path.exists(GOOGLE_KEY_PATH):
         creds = service_account.Credentials.from_service_account_file(
             GOOGLE_KEY_PATH,
@@ -42,7 +62,6 @@ def get_bq_client():
         )
         return bigquery.Client(project=PROJECT_ID, credentials=creds)
 
-    # 2) Streamlit Secrets
     try:
         if "gcp_service_account" in st.secrets:
             info = dict(st.secrets["gcp_service_account"])
@@ -54,15 +73,15 @@ def get_bq_client():
     except Exception:
         pass
 
-    # 3) ADC
     return bigquery.Client(project=PROJECT_ID)
 
 # =========================================================
-# 3) UI 한글 컬럼 매핑 (표시 전용)
+# 3) UI 한글 컬럼 매핑
 # =========================================================
 KOR_COL_MAP = {
     "inbound_date": "상담일자",
     "inbound_ts": "상담시점",
+    "inbound_channel": "인입채널",   # 🔥 [추가]
     "ticket_id": "티켓번호",
     "agent_center": "센터명",
     "agent_name": "담당자",
@@ -80,10 +99,6 @@ KOR_COL_MAP = {
     "order_nos": "전환주문번호",
     "sellers": "판매처",
     "matched_by": "매칭기준",
-    "ticket_phone": "고객휴대폰_티켓",
-    "buyer_phone": "주문자휴대폰",
-    "receiver_phone": "수취인휴대폰",
-    # 피벗/요약용
     "ticket_cnt": "티켓수",
     "conv_rate": "전환율",
 }
@@ -284,6 +299,7 @@ def load_raw(date_from, date_to, limit_rows: int, max_bytes_billed: int) -> pd.D
       request_ts,
       assigned_ts,
       ticket_id,
+      inbound_channel,
       brand_name,
       matched_brand,
       agent_center,
@@ -538,7 +554,7 @@ with tab_raw:
 
     show_cols = [
         "inbound_date", "inbound_ts",
-        "ticket_id", "agent_center", "agent_name",
+        "ticket_id","inbound_channel", "agent_center", "agent_name",
         "brand_name", "matched_brand",
         "category_lv1", "category_lv2", "category_lv3",
         "customer_phone",
@@ -563,3 +579,53 @@ with tab_raw:
         file_name=f"cnv_raw_{date_from}_{date_to}_limit{raw_limit}.csv",
         mime="text/csv",
     )
+
+
+# =========================================================
+# 🔥 [추가] 11) 인입채널별 전환율 요약 (페이지 최하단)
+# =========================================================
+
+st.divider()
+st.header("📊 인입채널별 전환율 현황 (Insight)")
+
+@st.cache_data(ttl=300)
+def load_channel_summary(date_from, date_to):
+    client = get_bq_client()
+    sql = f"""
+    SELECT
+      inbound_channel,
+      COUNT(1) AS ticket_cnt,
+      SUM(order_cnt) AS order_cnt,
+      SUM(order_amount) AS order_amount
+    FROM `{SOURCE_FQN}`
+    WHERE inbound_date BETWEEN @date_from AND @date_to
+    GROUP BY inbound_channel
+    ORDER BY ticket_cnt DESC
+    """
+    job_cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("date_from", "DATE", date_from),
+            bigquery.ScalarQueryParameter("date_to", "DATE", date_to),
+        ]
+    )
+    df = client.query(sql, job_cfg).to_dataframe()
+    df["conv_rate"] = df.apply(
+        lambda r: (r["order_cnt"] / r["ticket_cnt"]) if r["ticket_cnt"] else 0.0,
+        axis=1
+    )
+    return df
+
+ch_df = load_channel_summary(date_from, date_to)
+
+st.dataframe(
+    apply_kor_columns(ch_df),
+    use_container_width=True,
+    height=260
+)
+
+st.download_button(
+    "인입채널별 전환율 CSV 다운로드",
+    data=apply_kor_columns(ch_df).to_csv(index=False).encode("utf-8-sig"),
+    file_name="channel_conversion_summary.csv",
+    mime="text/csv",
+)
