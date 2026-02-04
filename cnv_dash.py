@@ -22,13 +22,15 @@ GOOGLE_KEY_PATH = os.environ.get(
     r"C:\tommy\BigQuery\strange-reducer-474905-g1-946a9f4f9fac.json"
 ).strip()
 
+BQ_LOCATION = os.environ.get("BQ_LOCATION", "asia-northeast3").strip()
+
 # =========================================================
 # 1) Streamlit 기본
 # =========================================================
 st.set_page_config(page_title="상담 → 주문(0~48h) 대시보드", layout="wide")
 st.title("📊 상담 → 주문전환 측정 (0~48h) 대시보드 ")
 
-# 🔥 [추가] 전환율 정의 노티
+# 🔥 전환율 정의 노티
 st.markdown(
     """
 <div style="
@@ -48,20 +50,26 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.caption(f" · 날짜 기준: 상담일자(inbound_date)")
+st.caption(" · 날짜 기준: 상담일자(inbound_date)")
 
 # =========================================================
-# 2) BigQuery Client (기존 코드 그대로)
+# 2) BigQuery Client (서울 리전 고정)
 # =========================================================
 @st.cache_resource(show_spinner=False)
 def get_bq_client():
+    # 1) 로컬 키파일 우선
     if GOOGLE_KEY_PATH and os.path.exists(GOOGLE_KEY_PATH):
         creds = service_account.Credentials.from_service_account_file(
             GOOGLE_KEY_PATH,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
-        return bigquery.Client(project=PROJECT_ID, credentials=creds)
+        return bigquery.Client(
+            project=PROJECT_ID,
+            credentials=creds,
+            location=BQ_LOCATION
+        )
 
+    # 2) Secrets
     try:
         if "gcp_service_account" in st.secrets:
             info = dict(st.secrets["gcp_service_account"])
@@ -69,11 +77,19 @@ def get_bq_client():
                 info,
                 scopes=["https://www.googleapis.com/auth/cloud-platform"],
             )
-            return bigquery.Client(project=PROJECT_ID, credentials=creds)
+            return bigquery.Client(
+                project=PROJECT_ID,
+                credentials=creds,
+                location=BQ_LOCATION
+            )
     except Exception:
         pass
 
-    return bigquery.Client(project=PROJECT_ID)
+    # 3) ADC
+    return bigquery.Client(
+        project=PROJECT_ID,
+        location=BQ_LOCATION
+    )
 
 # =========================================================
 # 3) UI 한글 컬럼 매핑
@@ -81,7 +97,7 @@ def get_bq_client():
 KOR_COL_MAP = {
     "inbound_date": "상담일자",
     "inbound_ts": "상담시점",
-    "inbound_channel": "인입채널",   # 🔥 [추가]
+    "inbound_channel": "인입채널",
     "ticket_id": "티켓번호",
     "agent_center": "센터명",
     "agent_name": "담당자",
@@ -107,6 +123,20 @@ def apply_kor_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={k: v for k, v in KOR_COL_MAP.items() if k in df.columns})
 
 # =========================================================
+# 3-1) 🔥 Rank: 화면은 "얇게" 보이게 (index로) / CSV는 컬럼으로
+# =========================================================
+def with_rank_index(df: pd.DataFrame, index_name: str = "Rank") -> pd.DataFrame:
+    out = df.copy()
+    out.index = range(1, len(out) + 1)
+    out.index.name = index_name
+    return out
+
+def with_rank_col(df: pd.DataFrame, col_name: str = "Rank") -> pd.DataFrame:
+    out = df.copy()
+    out.insert(0, col_name, range(1, len(out) + 1))
+    return out
+
+# =========================================================
 # 4) 비용 캡
 # =========================================================
 def bytes_from_gb(gb: float) -> int:
@@ -123,7 +153,6 @@ def month_start_end(y: int, m: int):
     return s, e
 
 def build_month_options(start_month: date, end_month: date):
-    # end_month는 "월 시작일"로 들어온다고 가정
     start_idx = start_month.year * 12 + start_month.month
     end_idx = end_month.year * 12 + end_month.month
     opts = []
@@ -135,7 +164,6 @@ def build_month_options(start_month: date, end_month: date):
 
 today = date.today()
 this_month_start = date(today.year, today.month, 1)
-
 month_options = build_month_options(START_MONTH, this_month_start)
 
 def on_month_change():
@@ -145,13 +173,11 @@ def on_month_change():
     st.session_state["date_from"] = s
     st.session_state["date_to"] = e
 
-# 세션 기본값
 if "selected_month" not in st.session_state:
     st.session_state["selected_month"] = f"{today.year}-{today.month:02d}"
 if st.session_state["selected_month"] not in month_options:
-    st.session_state["selected_month"] = month_options[0]  # 안전 fallback
+    st.session_state["selected_month"] = month_options[0]
 
-# 월을 기준으로 date_from/to 기본 세팅 (처음 1회)
 if "date_from" not in st.session_state or "date_to" not in st.session_state:
     y, m = map(int, st.session_state["selected_month"].split("-"))
     s, e = month_start_end(y, m)
@@ -159,7 +185,6 @@ if "date_from" not in st.session_state or "date_to" not in st.session_state:
     st.session_state["date_to"] = e
 
 st.sidebar.header("기간 선택")
-
 st.sidebar.selectbox(
     "월 선택",
     options=month_options,
@@ -191,8 +216,6 @@ st.sidebar.markdown(
 """,
     unsafe_allow_html=True
 )
-
-
 
 st.sidebar.divider()
 st.sidebar.header("피벗 설정")
@@ -268,7 +291,7 @@ def load_agg(date_from, date_to, rows, col, max_bytes_billed: int) -> pd.DataFra
         maximum_bytes_billed=max_bytes_billed,
     )
 
-    df = client.query(sql, job_config=job_config).to_dataframe(create_bqstorage_client=True)
+    df = client.query(sql, job_config=job_config, location=BQ_LOCATION).to_dataframe(create_bqstorage_client=True)
     df["conv_rate"] = df.apply(lambda r: (r["order_cnt"] / r["ticket_cnt"]) if r["ticket_cnt"] else 0.0, axis=1)
     return df
 
@@ -335,11 +358,11 @@ def load_raw(date_from, date_to, limit_rows: int, max_bytes_billed: int) -> pd.D
         maximum_bytes_billed=max_bytes_billed,
     )
 
-    df = client.query(sql, job_config=job_config).to_dataframe(create_bqstorage_client=True)
+    df = client.query(sql, job_config=job_config, location=BQ_LOCATION).to_dataframe(create_bqstorage_client=True)
     return df
 
 # =========================================================
-# 8) 표시 포맷
+# 8) 표시 포맷 (🔥 전환율 UI에서만 %로)
 # =========================================================
 def fmt_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -356,9 +379,10 @@ def fmt_display(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             return x
 
+    # ✅ 0.0697 -> 6.97% (UI 표시만 / 소수 2자리)
     def _rate(x):
         try:
-            return f"{float(x) * 100:.1f}%"
+            return f"{float(x) * 100:.2f}%"
         except Exception:
             return x
 
@@ -396,7 +420,7 @@ k1, k2, k3, k4 = st.columns(4)
 k1.metric("전체 티켓", f"{total_ticket:,}")
 k2.metric("전환 주문수", f"{total_orders:,}")
 k3.metric("전환 매출", f"{total_amount:,}")
-k4.metric("전환율", f"{rate * 100:.1f}%")
+k4.metric("전환율", f"{rate * 100:.2f}%")
 
 st.divider()
 
@@ -405,19 +429,55 @@ st.divider()
 # =========================================================
 tab_pivot, tab_raw = st.tabs(["📌 피벗(센터/상담사/유형)", "🧾 로우데이터 다운로드(매칭 결과)"])
 
+# =========================================================
+# (요청 2) 인입채널별 전환율: 피벗 탭 최하단 렌더
+# =========================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def load_channel_summary(date_from, date_to, max_bytes_billed: int) -> pd.DataFrame:
+    client = get_bq_client()
+    sql = f"""
+    SELECT
+      inbound_channel,
+      COUNT(1) AS ticket_cnt,
+      SUM(CAST(order_cnt AS INT64)) AS order_cnt,
+      SUM(CAST(order_amount AS INT64)) AS order_amount
+    FROM `{SOURCE_FQN}`
+    WHERE inbound_date BETWEEN @date_from AND @date_to
+    GROUP BY inbound_channel
+    """
+    job_cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("date_from", "DATE", date_from),
+            bigquery.ScalarQueryParameter("date_to", "DATE", date_to),
+        ],
+        maximum_bytes_billed=max_bytes_billed,
+    )
+    df = client.query(sql, job_config=job_cfg, location=BQ_LOCATION).to_dataframe(create_bqstorage_client=True)
+    df["inbound_channel"] = df["inbound_channel"].fillna("없음")
+    df["conv_rate"] = df.apply(
+        lambda r: (r["order_cnt"] / r["ticket_cnt"]) if r["ticket_cnt"] else 0.0,
+        axis=1
+    )
+    return df
+
 with tab_pivot:
     st.subheader("센터 요약(소계)")
     center_sum_sorted = center_sum.sort_values(sort_key, ascending=not sort_desc)
 
+    # ✅ 화면: Rank를 index로(폭 얇게)
+    center_ui_view = with_rank_index(center_sum_sorted)
     st.dataframe(
-        apply_kor_columns(fmt_display(center_sum_sorted)),
+        apply_kor_columns(fmt_display(center_ui_view)),
         use_container_width=True,
-        height=220
+        height=220,
+        hide_index=False  # Rank index 표시(폭 얇음)
     )
 
+    # ✅ CSV: Rank를 컬럼으로
+    center_ui_csv = with_rank_col(center_sum_sorted)
     st.download_button(
         "센터 요약 CSV 다운로드",
-        data=apply_kor_columns(center_sum_sorted).to_csv(index=False).encode("utf-8-sig"),
+        data=apply_kor_columns(center_ui_csv).to_csv(index=False).encode("utf-8-sig"),
         file_name="center_summary.csv",
         mime="text/csv",
     )
@@ -435,7 +495,7 @@ with tab_pivot:
         c_amount = int(sub["order_amount"].sum())
         c_rate = (c_orders / c_ticket) if c_ticket else 0.0
 
-        header = f"{center}  |  티켓 {c_ticket:,} · 전환주문 {c_orders:,} · 매출 {c_amount:,} · 전환율 {c_rate*100:.1f}%"
+        header = f"{center}  |  티켓 {c_ticket:,} · 전환주문 {c_orders:,} · 매출 {c_amount:,} · 전환율 {c_rate*100:.2f}%"
         with st.expander(header, expanded=(center in ["TCK", "SKMNS", "AI"])):
 
             if col is not None:
@@ -453,25 +513,65 @@ with tab_pivot:
                 keep_cols = ["agent_center"] + rows + ["ticket_cnt", "order_cnt", "order_amount", "conv_rate"]
                 pv = sub[keep_cols].copy()
 
-            # COLUMNS 없을 때만 min_ticket 적용(기존 동작 유지)
             if min_ticket > 0 and col is None and "ticket_cnt" in pv.columns:
                 pv = pv[pv["ticket_cnt"] >= min_ticket]
 
             if col is None and sort_key in pv.columns:
                 pv = pv.sort_values(sort_key, ascending=not sort_desc)
 
+            # ✅ 화면: Rank index로(폭 얇게)
+            pv_view = with_rank_index(pv)
             st.dataframe(
-                apply_kor_columns(fmt_display(pv)),
+                apply_kor_columns(fmt_display(pv_view)),
                 use_container_width=True,
-                height=520
+                height=520,
+                hide_index=False
             )
 
+            # ✅ CSV: Rank 컬럼
+            pv_csv = with_rank_col(pv)
             st.download_button(
                 f"{center} 피벗 CSV 다운로드",
-                data=apply_kor_columns(pv).to_csv(index=False).encode("utf-8-sig"),
+                data=apply_kor_columns(pv_csv).to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"pivot_{center}.csv",
                 mime="text/csv",
             )
+
+    # =========================================================
+    # 피벗 탭 최하단: 인입채널별 전환율 현황
+    # =========================================================
+    st.divider()
+    st.subheader("인입채널별 전환율 현황")
+
+    try:
+        ch_df = load_channel_summary(date_from, date_to, max_bytes_billed)
+    except Exception as e:
+        st.error(f"인입채널별 집계 로드 실패: {e}")
+        ch_df = pd.DataFrame()
+
+    if ch_df.empty:
+        st.info("인입채널 데이터가 없거나(컬럼 NULL), 기간 내 데이터가 없습니다.")
+    else:
+        if sort_key in ch_df.columns:
+            ch_df = ch_df.sort_values(sort_key, ascending=not sort_desc)
+
+        # ✅ 화면: Rank index로(폭 얇게)
+        ch_view = with_rank_index(ch_df)
+        st.dataframe(
+            apply_kor_columns(fmt_display(ch_view)),
+            use_container_width=True,
+            height=260,
+            hide_index=False
+        )
+
+        # ✅ CSV: Rank 컬럼
+        ch_csv = with_rank_col(ch_df)
+        st.download_button(
+            "인입채널별 전환율 CSV 다운로드",
+            data=apply_kor_columns(ch_csv).to_csv(index=False).encode("utf-8-sig"),
+            file_name="channel_conversion_summary.csv",
+            mime="text/csv",
+        )
 
 with tab_raw:
     st.subheader("로우데이터 (ticket+ order  매칭 결과 확인 / CSV 다운로드)")
@@ -532,9 +632,8 @@ with tab_raw:
         filtered = filtered[(filtered["matched_by"].isin(matched_by_sel)) | (filtered["converted_yn"] == "X")].copy()
 
     if q:
-        # 문자열 캐스팅
         for c in ["ticket_id", "order_nos", "customer_phone", "brand_name", "matched_brand",
-                  "ticket_phone", "buyer_phone", "receiver_phone"]:
+                  "ticket_phone", "buyer_phone", "receiver_phone", "inbound_channel"]:
             if c in filtered.columns:
                 filtered.loc[:, c] = filtered[c].astype(str)
 
@@ -547,6 +646,7 @@ with tab_raw:
             | filtered["ticket_phone"].str.contains(q, na=False)
             | filtered["buyer_phone"].str.contains(q, na=False)
             | filtered["receiver_phone"].str.contains(q, na=False)
+            | filtered["inbound_channel"].str.contains(q, na=False)
         )
         filtered = filtered[mask].copy()
 
@@ -554,7 +654,7 @@ with tab_raw:
 
     show_cols = [
         "inbound_date", "inbound_ts",
-        "ticket_id","inbound_channel", "agent_center", "agent_name",
+        "ticket_id", "inbound_channel", "agent_center", "agent_name",
         "brand_name", "matched_brand",
         "category_lv1", "category_lv2", "category_lv3",
         "customer_phone",
@@ -567,65 +667,22 @@ with tab_raw:
     ]
     show_cols = [c for c in show_cols if c in filtered.columns]
 
+    raw_base = filtered[show_cols].copy()
+
+    # ✅ 화면: Rank index로(폭 얇게)
+    raw_view = with_rank_index(raw_base)
     st.dataframe(
-        apply_kor_columns(filtered[show_cols]),
+        apply_kor_columns(raw_view),
         use_container_width=True,
-        height=650
+        height=650,
+        hide_index=False
     )
 
+    # ✅ CSV: Rank 컬럼
+    raw_csv = with_rank_col(raw_base)
     st.download_button(
         "로우데이터 CSV 다운로드(필터 반영)",
-        data=apply_kor_columns(filtered[show_cols]).to_csv(index=False).encode("utf-8-sig"),
+        data=apply_kor_columns(raw_csv).to_csv(index=False).encode("utf-8-sig"),
         file_name=f"cnv_raw_{date_from}_{date_to}_limit{raw_limit}.csv",
         mime="text/csv",
     )
-
-
-# =========================================================
-# 🔥 [추가] 11) 인입채널별 전환율 요약 (페이지 최하단)
-# =========================================================
-
-st.divider()
-st.header("📊 인입채널별 전환율 현황 (Insight)")
-
-@st.cache_data(ttl=300)
-def load_channel_summary(date_from, date_to):
-    client = get_bq_client()
-    sql = f"""
-    SELECT
-      inbound_channel,
-      COUNT(1) AS ticket_cnt,
-      SUM(order_cnt) AS order_cnt,
-      SUM(order_amount) AS order_amount
-    FROM `{SOURCE_FQN}`
-    WHERE inbound_date BETWEEN @date_from AND @date_to
-    GROUP BY inbound_channel
-    ORDER BY ticket_cnt DESC
-    """
-    job_cfg = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("date_from", "DATE", date_from),
-            bigquery.ScalarQueryParameter("date_to", "DATE", date_to),
-        ]
-    )
-    df = client.query(sql, job_cfg).to_dataframe()
-    df["conv_rate"] = df.apply(
-        lambda r: (r["order_cnt"] / r["ticket_cnt"]) if r["ticket_cnt"] else 0.0,
-        axis=1
-    )
-    return df
-
-ch_df = load_channel_summary(date_from, date_to)
-
-st.dataframe(
-    apply_kor_columns(ch_df),
-    use_container_width=True,
-    height=260
-)
-
-st.download_button(
-    "인입채널별 전환율 CSV 다운로드",
-    data=apply_kor_columns(ch_df).to_csv(index=False).encode("utf-8-sig"),
-    file_name="channel_conversion_summary.csv",
-    mime="text/csv",
-)
