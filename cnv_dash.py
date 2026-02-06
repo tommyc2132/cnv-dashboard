@@ -639,7 +639,7 @@ with tab_pivot:
                 st.info("검색 결과가 없습니다.")
             else:
                 total = int(my["grand_total"].sum())
-                st.success(f"✅ '{me}' 예상 보상 합계: {total:,}원 (개인+골든벨+공통포상 포함)")
+                st.success(f"✅ '{me}'님의 예상 인센티브 합계는: {total:,}원 입니다. (개인+골든벨+공통포상 포함)")
                 st.dataframe(
                     apply_kor_columns(with_rank_index(
                         my[[
