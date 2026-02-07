@@ -30,7 +30,7 @@ BQ_LOCATION = os.environ.get("BQ_LOCATION", "asia-northeast3").strip()
 st.set_page_config(page_title="상담 → 주문(0~48h) 대시보드", layout="wide")
 st.title("📊 상담 → 주문전환 측정 (0~48h) 대시보드 ")
 
-# 🔥 전환율 정의 노티
+# 전환율 정의 노티
 st.markdown(
     """
 <div style="
@@ -125,7 +125,7 @@ def apply_kor_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={k: v for k, v in KOR_COL_MAP.items() if k in df.columns})
 
 # =========================================================
-# Rank: UI에 표시되는 Rank는 무조건 "전환주문수(order_cnt) DESC"
+# Rank: UI에 표시되는 Rank Defualt "전환주문수(order_cnt) DESC"
 # =========================================================
 def with_rank_index(df: pd.DataFrame, index_name: str = "Rank") -> pd.DataFrame:
     out = df.copy()
@@ -220,7 +220,7 @@ col = None if col == "(없음)" else col
 
 min_ticket = st.sidebar.number_input("최소 티켓수(필터, COLUMNS 없을 때)", min_value=0, value=0, step=10)
 
-# 표 표시 순서(랭크는 별도 fixed)
+
 sort_key = st.sidebar.selectbox("정렬(표 표시 순서)", options=["order_cnt", "ticket_cnt", "order_amount", "conv_rate"], index=0)
 sort_desc = st.sidebar.checkbox("내림차순", value=True)
 
@@ -231,10 +231,7 @@ max_bytes_billed = bytes_from_gb(max_gb)
 
 raw_limit = st.sidebar.selectbox("로우데이터 기본 LIMIT", options=[1000, 5000, 20000, 50000, 100000], index=3)
 
-# =========================================================
-# 프로모션 설정 (2월 한정)
-# - AI센터 완전 제외(보상 0 + KPI 예상비용에서도 제외)
-# =========================================================
+# 프로모션 설정 해보자..(2월 한정)
 PROMO_CONFIG = {
     "promo_year": 2026,
     "promo_month": 2,
@@ -257,7 +254,7 @@ def is_promo_month(date_from: date, date_to: date) -> bool:
 def golden_bell_amount_fixed(order_cnt: int, step: int) -> int:
     if step <= 0 or order_cnt <= 0:
         return 0
-    # ✅ 무한 증가: (order_cnt // step) 구간수만큼 1만원 누적
+    # (order_cnt // step) 구간수만큼 1만원 누적
     return 10_000 * (int(order_cnt) // int(step))
 
 def is_promo_center(center: str) -> bool:
@@ -272,7 +269,7 @@ def add_target_cols_center(df: pd.DataFrame) -> pd.DataFrame:
     out["ach_rate"] = out.apply(lambda r: (r["order_cnt"] / r["target"]) if r["target"] else 0.0, axis=1)
     out["center_bonus_achieved"] = out.apply(lambda r: (r["target"] > 0 and r["order_cnt"] >= r["target"]), axis=1)
 
-    # ✅ 표에서 체크박스 대신 아이콘으로 보여주기(요청사항)
+
     out["center_ach_mark"] = out["center_bonus_achieved"].apply(lambda x: "✅" if bool(x) else "❌")
     return out
 
@@ -485,13 +482,11 @@ promo_on = is_promo_month(date_from, date_to)
 if promo_on:
     center_sum = add_target_cols_center(center_sum)
 
-# 표 표시 순서(표 자체는 sort_key로 / Rank는 order_cnt로)
+# 표 표시 순서(표 자체는 sort_key Rank는 order_cnt로)
 center_sum_sorted = center_sum.sort_values(sort_key, ascending=not sort_desc)
 
 # =========================================================
-# ✅ KPI 섹션 구성(요청사항)
-# - 기본 KPI는 항상 상단(전체티켓/전환주문/전환매출/전환율)
-# - 2월이면 아래에 "작은" 프로모션 카드(목표/달성/달성률/예상비용) 추가
+# ✅ KPI 섹션 구성
 # =========================================================
 total_ticket = int(center_sum_sorted["ticket_cnt"].sum())
 total_orders = int(center_sum_sorted["order_cnt"].sum())
@@ -504,10 +499,10 @@ k2.metric("전환 주문수", f"{total_orders:,}")
 k3.metric("전환 매출", f"{total_amount:,}")
 k4.metric("전환율", f"{total_rate * 100:.2f}%")
 
-# 🔥 2월 프로모션은 아래로, 더 작게 + 임팩트 있는 카드
+# 예상비용
 if promo_on:
     promo_df_tmp = build_agent_promo_table(agg_df)
-    # ✅ 예상비용은 promo_center_yn=True만 합산(AI 제외)
+    # 예상비용은 promo_center_yn=True만 합산(AI 제외)
     total_grand = int(promo_df_tmp.loc[promo_df_tmp["promo_center_yn"] == True, "grand_total"].sum())
 
     total_target = int(center_sum_sorted.get("target", pd.Series([0])).sum())
@@ -576,7 +571,7 @@ with tab_pivot:
     st.subheader("센터 요약(소계)")
 
     # =========================================================
-    # ✅ 요청사항 1) 센터요약 표 컬럼 순서 고정
+    #  컬럼 순서
     #    Rank | 센터명 | 티켓수 | 목표(전환건) | 전환주문수 | 주문금액 | 전환율 | 달성률 | 목표달성여부
     # =========================================================
     center_view = with_rank_index(center_sum_sorted)
@@ -605,7 +600,7 @@ with tab_pivot:
         hide_index=False
     )
 
-    # CSV도 같은 컬럼 순서(+Rank 컬럼 포함)
+    # CSV도 같은 컬럼 순서
     center_csv = with_rank_col(center_sum_sorted)
     for c in desired_cols:
         if c not in center_csv.columns:
@@ -678,11 +673,7 @@ with tab_pivot:
             mime="text/csv",
         )
 
-        # =========================================================
-        # ✅ 요청사항 2) 표 하단 UI 추가
-        #  - 굵지만 작은글씨로 상세내용 링크
-        #  - 회색 안내문(골든벨 기준)
-        # =========================================================
+        # 표 하단 UI
         st.markdown(
             """
 <div style="margin-top:10px;">
