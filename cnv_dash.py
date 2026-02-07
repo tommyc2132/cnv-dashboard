@@ -9,9 +9,7 @@ import streamlit as st
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-# =========================================================
-# 0) 고정 설정
-# =========================================================
+# 구글 세팅
 PROJECT_ID = os.environ.get("PROJECT_ID", "strange-reducer-474905-g1").strip()
 
 DEFAULT_TABLE_FQN = f"{PROJECT_ID}.streamlit.cnv_dash_tbl"
@@ -24,9 +22,7 @@ GOOGLE_KEY_PATH = os.environ.get(
 
 BQ_LOCATION = os.environ.get("BQ_LOCATION", "asia-northeast3").strip()
 
-# =========================================================
-# 1) Streamlit 기본
-# =========================================================
+# main & layout setting
 st.set_page_config(page_title="상담 → 주문(0~48h) 대시보드", layout="wide")
 st.title("📊 상담 → 주문전환 측정 (0~48h) 대시보드 ")
 
@@ -52,12 +48,10 @@ st.markdown(
 
 st.caption(" · 날짜 기준: 상담일자(inbound_date)")
 
-# =========================================================
-# 2) BigQuery Client (서울 리전 고정)
-# =========================================================
+# Big Query Setting (리전 : Seoul)
 @st.cache_resource(show_spinner=False)
 def get_bq_client():
-    # 1) 로컬 키파일 우선
+    # 1) 로컬 키파일
     if GOOGLE_KEY_PATH and os.path.exists(GOOGLE_KEY_PATH):
         creds = service_account.Credentials.from_service_account_file(
             GOOGLE_KEY_PATH,
@@ -80,9 +74,7 @@ def get_bq_client():
     # 3) ADC
     return bigquery.Client(project=PROJECT_ID, location=BQ_LOCATION)
 
-# =========================================================
-# 3) UI 한글 컬럼 매핑
-# =========================================================
+# 한글로송출
 KOR_COL_MAP = {
     "inbound_date": "상담일자",
     "inbound_ts": "상담시점",
@@ -124,9 +116,9 @@ KOR_COL_MAP = {
 def apply_kor_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={k: v for k, v in KOR_COL_MAP.items() if k in df.columns})
 
-# =========================================================
+
 # Rank: UI에 표시되는 Rank Defualt "전환주문수(order_cnt) DESC"
-# =========================================================
+
 def with_rank_index(df: pd.DataFrame, index_name: str = "Rank") -> pd.DataFrame:
     out = df.copy()
     if "order_cnt" in out.columns:
@@ -142,15 +134,15 @@ def with_rank_col(df: pd.DataFrame, col_name: str = "Rank") -> pd.DataFrame:
     out.insert(0, col_name, range(1, len(out) + 1))
     return out
 
-# =========================================================
-# 4) 비용 캡
-# =========================================================
+
+# 비용 캡
+
 def bytes_from_gb(gb: float) -> int:
     return int(gb * 1024 * 1024 * 1024)
 
-# =========================================================
-# 5) 기간 선택
-# =========================================================
+
+# 기간 선택
+
 START_MONTH = date(2026, 1, 1)
 
 def month_start_end(y: int, m: int):
@@ -231,7 +223,7 @@ max_bytes_billed = bytes_from_gb(max_gb)
 
 raw_limit = st.sidebar.selectbox("로우데이터 기본 LIMIT", options=[1000, 5000, 20000, 50000, 100000], index=3)
 
-# 프로모션 설정 해보자..(2월 한정)
+# Promotion (2월 한정)
 PROMO_CONFIG = {
     "promo_year": 2026,
     "promo_month": 2,
@@ -254,7 +246,7 @@ def is_promo_month(date_from: date, date_to: date) -> bool:
 def golden_bell_amount_fixed(order_cnt: int, step: int) -> int:
     if step <= 0 or order_cnt <= 0:
         return 0
-    # (order_cnt // step) 구간수만큼 1만원 누적
+    # (order_cnt // step) 구간수만큼 만원씩 누적 (팀장님 확인건)
     return 10_000 * (int(order_cnt) // int(step))
 
 def is_promo_center(center: str) -> bool:
@@ -290,7 +282,7 @@ def build_agent_promo_table(agg_df: pd.DataFrame) -> pd.DataFrame:
 
     per = int(PROMO_CONFIG["per_order_reward"])
 
-    # 대상센터 아니면 0원(AI 포함)
+    # TCK, SKMNS 아니면 0원(AI 포함)
     base["personal_per_order"] = base.apply(lambda r: (int(r["order_cnt"]) * per) if bool(r["promo_center_yn"]) else 0, axis=1)
     base["golden_bell"] = base.apply(lambda r: golden_bell_amount_fixed(int(r["order_cnt"]), int(r["step"])) if bool(r["promo_center_yn"]) else 0, axis=1)
     base["golden_level"] = base.apply(lambda r: (int(r["order_cnt"]) // int(r["step"])) if (bool(r["promo_center_yn"]) and int(r["step"]) > 0) else 0, axis=1)
@@ -330,9 +322,7 @@ def build_agent_promo_table(agg_df: pd.DataFrame) -> pd.DataFrame:
     base["grand_total"] = base["personal_total"] + base["center_bonus"]
     return base
 
-# =========================================================
-# 6) 집계 로드
-# =========================================================
+#  집계
 @st.cache_data(ttl=300, show_spinner=True)
 def load_agg(date_from, date_to, rows, col, max_bytes_billed: int) -> pd.DataFrame:
     client = get_bq_client()
@@ -381,9 +371,7 @@ def center_summary_from_agg(agg_df: pd.DataFrame) -> pd.DataFrame:
     cs["conv_rate"] = cs.apply(lambda r: (r["order_cnt"] / r["ticket_cnt"]) if r["ticket_cnt"] else 0.0, axis=1)
     return cs
 
-# =========================================================
 # 7) Raw 로드
-# =========================================================
 @st.cache_data(ttl=300, show_spinner=True)
 def load_raw(date_from, date_to, limit_rows: int, max_bytes_billed: int) -> pd.DataFrame:
     client = get_bq_client()
@@ -430,9 +418,7 @@ def load_raw(date_from, date_to, limit_rows: int, max_bytes_billed: int) -> pd.D
     )
     return client.query(sql, job_config=job_config, location=BQ_LOCATION).to_dataframe(create_bqstorage_client=True)
 
-# =========================================================
-# 8) 표시 포맷
-# =========================================================
+#  표시 포맷
 def fmt_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
@@ -463,9 +449,7 @@ def fmt_display(df: pd.DataFrame) -> pd.DataFrame:
             out[c] = out[c].apply(_rate)
     return out
 
-# =========================================================
-# 9) 실행: 집계 로드
-# =========================================================
+# 실행: 집계 로드
 try:
     agg_df = load_agg(date_from, date_to, rows, col, max_bytes_billed)
 except Exception as e:
@@ -485,9 +469,7 @@ if promo_on:
 # 표 표시 순서(표 자체는 sort_key Rank는 order_cnt로)
 center_sum_sorted = center_sum.sort_values(sort_key, ascending=not sort_desc)
 
-# =========================================================
-# ✅ KPI 섹션 구성
-# =========================================================
+# KPI 섹션 구성
 total_ticket = int(center_sum_sorted["ticket_cnt"].sum())
 total_orders = int(center_sum_sorted["order_cnt"].sum())
 total_amount = int(center_sum_sorted["order_amount"].sum())
@@ -537,9 +519,7 @@ else:
 
 st.divider()
 
-# =========================================================
-# 10) Tabs
-# =========================================================
+# Tabs
 tab_pivot, tab_raw = st.tabs(["📌 피벗(센터/상담사/유형)", "🧾 로우데이터 다운로드(매칭 결과)"])
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -571,7 +551,7 @@ with tab_pivot:
     st.subheader("센터 요약(소계)")
 
     # =========================================================
-    #  컬럼 순서
+    #  컬럼
     #    Rank | 센터명 | 티켓수 | 목표(전환건) | 전환주문수 | 주문금액 | 전환율 | 달성률 | 목표달성여부
     # =========================================================
     center_view = with_rank_index(center_sum_sorted)
@@ -634,7 +614,7 @@ with tab_pivot:
                 st.info("검색 결과가 없습니다.")
             else:
                 total = int(my["grand_total"].sum())
-                st.success(f"✅ '{me}'님의 예상 인센티브 합계는: {total:,}원 입니다. (개인+골든벨+공통포상 포함)")
+                st.success(f"✅ '{me}'님의 예상 인센티브 합계는 {total:,}원 입니다🎉")
                 st.dataframe(
                     apply_kor_columns(with_rank_index(
                         my[[
